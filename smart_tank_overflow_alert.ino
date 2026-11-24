@@ -1,810 +1,370 @@
 
-#include <EEPROM.h>
-#include <Adafruit_LiquidCrystal.h>
+// ==========================================
+// SMART WATER TANK MONITORING SYSTEM
+// Arduino UNO R3
+// HC-SR04 + LEDs + Buzzer + Push Button + Motor
+// ==========================================
 
-Adafruit_LiquidCrystal lcd(0);
+// Ultrasonic sensor pins
+const int trigPin = 9;
+const int echoPin = 10;
 
-// =============== PIN CONFIGURATION ===============
+// LED pins
+const int greenLED = 2;
+const int yellowLED = 3;
+const int redLED = 4;
 
-const int GREEN_LED = 2;
-const int YELLOW_LED = 3;
-const int RED_LED = 4;
+// Other component pins
+const int buzzerPin = 5;
+const int buttonPin = 6;
+const int motorPin = 7;
 
-const int TRIG_PIN = 5;
-const int ECHO_PIN = 6;
+// Tank configuration
+const float tankHeightCm = 16.0;
+const float tankCapacityLitres = 1.0;
 
-const int BUTTON_PIN = 7;
-const int BUZZER_PIN = 8;
-const int PUMP_PIN = 9;
+// Water-level thresholds
+const float lowLevel = 25.0;
+const float fullLevel = 95.0;
 
-// =============== PROJECT SETTINGS ===============
+// Sensor settings
+float emptyDistanceCm = 16.0;
 
-const int LOW_LEVEL = 40;
-const int FULL_LEVEL = 80;
-const int STOP_LEVEL = 90;
+// Reading variables
+float distanceCm = 0;
+float waterHeightCm = 0;
+float waterLevelPercent = 0;
+float waterLevelLitres = 0;
 
-const float TANK_CAPACITY_L = 500.0;
-const float PUMP_POWER_W = 750.0;
-const float ELECTRICITY_RATE = 8.0;
+// Usage tracking
+float waterConsumedLitres = 0;
+float previousWaterLevelLitres = -1;
 
-const int USE_DEADBAND = 2;
-
-const unsigned long DAY_LENGTH_MS = 120000UL;
-const unsigned long MEASURE_INTERVAL = 500UL;
-const unsigned long SAVE_INTERVAL = 30000UL;
-const unsigned long REPORT_INTERVAL = 10000UL;
-
-const unsigned long LONG_PRESS_MS = 1000UL;
-const unsigned long PAGE_INTERVAL_MS = 2000UL;
-
-const int LOG_ADDR = 8;
-const unsigned int LOG_MAGIC = 0x51A7;
-
-// =============== EEPROM DATA ===============
-
-struct UsageRecord {
-  unsigned int magic;
-  float waterUsedToday;
-  unsigned long pumpTodaySeconds;
-  float yesterdayWater;
-  unsigned long yesterdayPumpSeconds;
-  unsigned int completedDays;
-};
-
-UsageRecord savedData;
-
-// =============== GLOBAL VARIABLES ===============
-
-int tankEmptyCm = 100;
-int waterLevel = 0;
-long distanceCm = 0;
-
-float waterUsedToday = 0;
-float yesterdayWater = 0;
-
-unsigned long pumpRunTodayMs = 0;
-unsigned long yesterdayPumpSeconds = 0;
-
-unsigned int completedDays = 0;
-
+// Pump status
 bool pumpOn = false;
-bool sensorOk = true;
-bool logDirty = false;
 
-int referenceLevel = -1;
-byte badReads = 0;
+// Timing
+unsigned long lastSensorRead = 0;
+unsigned long lastSerialSend = 0;
+unsigned long lastBuzzerTime = 0;
 
-unsigned long lastMeasure = 0;
-unsigned long lastRuntimeUpdate = 0;
-unsigned long lastSave = 0;
-unsigned long lastReport = 0;
-unsigned long dayStart = 0;
-unsigned long messageUntil = 0;
-
-bool lastButtonReading = HIGH;
-bool stableButtonState = HIGH;
+// Button handling
 bool buttonPressed = false;
 bool longPressHandled = false;
+unsigned long buttonPressTime = 0;
 
-unsigned long lastDebounceTime = 0;
-unsigned long buttonPressStarted = 0;
+// Buzzer handling
+bool buzzerOn = false;
 
-bool summaryActive = false;
-unsigned long summaryStart = 0;
+// ==========================================
+// READ ULTRASONIC SENSOR
+// ==========================================
 
-// =============== PUMP CONTROL ===============
-
-void setPump(bool state) {
-  pumpOn = state;
-  digitalWrite(PUMP_PIN, state ? HIGH : LOW);
-}
-
-// =============== ULTRASONIC SENSOR ===============
-
-long readDistanceCm() {
-
-  digitalWrite(TRIG_PIN, LOW);
+float readDistance() {
+  digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
 
-  digitalWrite(TRIG_PIN, HIGH);
+  digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
 
-  digitalWrite(TRIG_PIN, LOW);
-
-  unsigned long duration =
-    pulseIn(ECHO_PIN, HIGH, 30000UL);
+  unsigned long duration = pulseIn(echoPin, HIGH, 30000);
 
   if (duration == 0) {
     return -1;
   }
 
-  return duration / 58;
-}
+  float distance = duration * 0.0343 / 2.0;
 
-// =============== EEPROM STORAGE ===============
-
-void saveUsage() {
-
-  savedData.magic = LOG_MAGIC;
-
-  savedData.waterUsedToday = waterUsedToday;
-
-  savedData.pumpTodaySeconds =
-    pumpRunTodayMs / 1000UL;
-
-  savedData.yesterdayWater = yesterdayWater;
-
-  savedData.yesterdayPumpSeconds =
-    yesterdayPumpSeconds;
-
-  savedData.completedDays = completedDays;
-
-  EEPROM.put(LOG_ADDR, savedData);
-
-  logDirty = false;
-  lastSave = millis();
-}
-
-void loadUsage() {
-
-  EEPROM.get(LOG_ADDR, savedData);
-
-  bool valid =
-    savedData.magic == LOG_MAGIC &&
-    savedData.waterUsedToday >= 0 &&
-    savedData.waterUsedToday < 1000000.0 &&
-    savedData.pumpTodaySeconds < 31536000UL &&
-    savedData.yesterdayWater >= 0 &&
-    savedData.yesterdayWater < 1000000.0 &&
-    savedData.yesterdayPumpSeconds < 31536000UL;
-
-  if (!valid) {
-
-    waterUsedToday = 0;
-    pumpRunTodayMs = 0;
-
-    yesterdayWater = 0;
-    yesterdayPumpSeconds = 0;
-
-    completedDays = 0;
-
-    saveUsage();
+  if (distance < 2 || distance > 400) {
+    return -1;
   }
-  else {
 
-    waterUsedToday = savedData.waterUsedToday;
-
-    pumpRunTodayMs =
-      savedData.pumpTodaySeconds * 1000UL;
-
-    yesterdayWater = savedData.yesterdayWater;
-
-    yesterdayPumpSeconds =
-      savedData.yesterdayPumpSeconds;
-
-    completedDays = savedData.completedDays;
-  }
+  return distance;
 }
 
-// =============== WATER CONSUMPTION ===============
+// ==========================================
+// UPDATE WATER LEVEL
+// ==========================================
 
-void trackWaterUsage() {
+void updateWaterLevel() {
 
-  if (referenceLevel < 0) {
-    referenceLevel = waterLevel;
+  distanceCm = readDistance();
+
+  if (distanceCm < 0) {
+    waterLevelPercent = -1;
+    waterLevelLitres = 0;
     return;
   }
 
-  if (waterLevel >= referenceLevel) {
-
-    referenceLevel = waterLevel;
-  }
-  else if (referenceLevel - waterLevel >= USE_DEADBAND) {
-
-    int difference = referenceLevel - waterLevel;
-
-    float consumed =
-      difference * TANK_CAPACITY_L / 100.0;
-
-    waterUsedToday += consumed;
-
-    referenceLevel = waterLevel;
-
-    logDirty = true;
-  }
-}
-
-// =============== ENERGY CALCULATION ===============
-
-float calculateEnergy() {
-
-  float pumpHours =
-    pumpRunTodayMs / 3600000.0;
-
-  return pumpHours * PUMP_POWER_W / 1000.0;
-}
-
-float calculateCost() {
-
-  return calculateEnergy() * ELECTRICITY_RATE;
-}
-
-// =============== TIME DISPLAY ===============
-
-void printDurationLCD(unsigned long seconds) {
-
-  unsigned long hours = seconds / 3600UL;
-  unsigned long minutes = (seconds % 3600UL) / 60UL;
-  unsigned long remaining = seconds % 60UL;
-
-  if (hours < 10) lcd.print('0');
-  lcd.print(hours);
-  lcd.print(':');
-
-  if (minutes < 10) lcd.print('0');
-  lcd.print(minutes);
-  lcd.print(':');
-
-  if (remaining < 10) lcd.print('0');
-  lcd.print(remaining);
-}
-
-void printDurationSerial(unsigned long seconds) {
-
-  unsigned long hours = seconds / 3600UL;
-  unsigned long minutes = (seconds % 3600UL) / 60UL;
-  unsigned long remaining = seconds % 60UL;
-
-  if (hours < 10) Serial.print('0');
-  Serial.print(hours);
-  Serial.print(':');
-
-  if (minutes < 10) Serial.print('0');
-  Serial.print(minutes);
-  Serial.print(':');
-
-  if (remaining < 10) Serial.print('0');
-  Serial.print(remaining);
-}
-
-// =============== LCD ROW CONTROL ===============
-
-void clearLCDRow(int row) {
-
-  lcd.setCursor(0, row);
-  lcd.print("                ");
-  lcd.setCursor(0, row);
-}
-
-// =============== LCD STATISTICS ===============
-
-void showSummary() {
-
-  unsigned long elapsed =
-    millis() - summaryStart;
-
-  byte page = elapsed / PAGE_INTERVAL_MS;
-
-  if (page >= 6) {
-    summaryActive = false;
-    return;
-  }
-
-  clearLCDRow(0);
-  clearLCDRow(1);
-
-  switch (page) {
-
-    case 0:
-
-      lcd.print("USED TODAY");
-
-      lcd.setCursor(0, 1);
-      lcd.print(waterUsedToday, 1);
-      lcd.print(" Litres");
-
-      break;
-
-    case 1:
-
-      lcd.print("PUMP RUN TODAY");
-
-      lcd.setCursor(0, 1);
-      printDurationLCD(pumpRunTodayMs / 1000UL);
-
-      break;
-
-    case 2:
-
-      lcd.print("ENERGY TODAY");
-
-      lcd.setCursor(0, 1);
-      lcd.print(calculateEnergy(), 3);
-      lcd.print(" kWh");
-
-      break;
-
-    case 3:
-
-      lcd.print("ELECTRICITY COST");
-
-      lcd.setCursor(0, 1);
-      lcd.print("Rs ");
-      lcd.print(calculateCost(), 2);
-
-      break;
-
-    case 4:
-
-      lcd.print("YESTERDAY WATER");
-
-      lcd.setCursor(0, 1);
-
-      if (completedDays == 0) {
-        lcd.print("No previous data");
-      }
-      else {
-        lcd.print(yesterdayWater, 1);
-        lcd.print(" Litres");
-      }
-
-      break;
-
-    case 5:
-
-      lcd.print("YDAY PUMP TIME");
-
-      lcd.setCursor(0, 1);
-
-      if (completedDays == 0) {
-        lcd.print("No previous data");
-      }
-      else {
-        printDurationLCD(yesterdayPumpSeconds);
-      }
-
-      break;
-  }
-}
-
-// =============== NORMAL LCD DISPLAY ===============
-
-void updateLCD() {
-
-  if (summaryActive) {
-
-    showSummary();
-
-    if (summaryActive) {
-      return;
-    }
-  }
-
-  clearLCDRow(0);
-
-  if (!sensorOk) {
-
-    lcd.print("SENSOR ERROR");
-
-    clearLCDRow(1);
-    lcd.print("PUMP: OFF");
-
-    return;
-  }
-
-  lcd.print("LEVEL:");
-  lcd.print(waterLevel);
-  lcd.print("% ");
-
-  if (waterLevel < LOW_LEVEL) {
-    lcd.print("LOW");
-  }
-  else if (waterLevel < FULL_LEVEL) {
-    lcd.print("MEDIUM");
-  }
-  else {
-    lcd.print("FULL");
-  }
-
-  clearLCDRow(1);
-
-  if (millis() < messageUntil) {
-
-    lcd.print("TANK SET ");
-    lcd.print(tankEmptyCm);
-    lcd.print("cm");
-  }
-  else {
-
-    lcd.print("PUMP:");
-
-    if (pumpOn) {
-      lcd.print("ON ");
-    }
-    else {
-      lcd.print("OFF");
-    }
-
-    lcd.print("AUTO");
-  }
-}
-
-// =============== WATER LEVEL CONTROL ===============
-
-void measureAndControl() {
-
-  long measuredDistance = readDistanceCm();
-
-  if (measuredDistance < 2 || measuredDistance > 400) {
-
-    if (badReads < 3) {
-      badReads++;
-    }
-  }
-  else {
-
-    distanceCm = measuredDistance;
-    badReads = 0;
-  }
-
-  sensorOk = badReads < 3;
-
-  if (!sensorOk) {
-
-    setPump(false);
-
-    digitalWrite(GREEN_LED, LOW);
-    digitalWrite(YELLOW_LED, LOW);
-    digitalWrite(RED_LED, LOW);
-
-    updateLCD();
-    return;
-  }
-
-  long percentage =
-    ((long)tankEmptyCm - distanceCm) * 100L /
-    tankEmptyCm;
-
-  if (percentage < 0) percentage = 0;
-  if (percentage > 100) percentage = 100;
-
-  waterLevel = (int)percentage;
-
-  trackWaterUsage();
-
-  // Automatic pump control.
-
-  if (waterLevel < LOW_LEVEL) {
-    setPump(true);
-  }
-  else if (waterLevel >= STOP_LEVEL) {
-    setPump(false);
-  }
-
-  // LED indicators.
-
-  digitalWrite(
-    GREEN_LED,
-    waterLevel < LOW_LEVEL ? HIGH : LOW
+  waterHeightCm = emptyDistanceCm - distanceCm;
+
+  waterHeightCm = constrain(
+    waterHeightCm,
+    0,
+    tankHeightCm
   );
 
-  digitalWrite(
-    YELLOW_LED,
-    waterLevel >= LOW_LEVEL &&
-    waterLevel < FULL_LEVEL ? HIGH : LOW
+  waterLevelPercent =
+    (waterHeightCm / tankHeightCm) * 100.0;
+
+  waterLevelPercent = constrain(
+    waterLevelPercent,
+    0,
+    100
   );
 
-  digitalWrite(
-    RED_LED,
-    waterLevel >= FULL_LEVEL ? HIGH : LOW
-  );
+  waterLevelLitres =
+    (waterLevelPercent / 100.0) *
+    tankCapacityLitres;
 
-  updateLCD();
-}
+  // Estimate consumption when the water level decreases
+  if (previousWaterLevelLitres >= 0) {
 
-// =============== BUTTON ACTION ===============
+    float difference =
+      previousWaterLevelLitres - waterLevelLitres;
 
-void calibrateTank() {
-
-  if (
-    sensorOk &&
-    distanceCm >= 5 &&
-    distanceCm <= 250
-  ) {
-
-    tankEmptyCm = (int)distanceCm;
-
-    EEPROM.update(0, (byte)tankEmptyCm);
-
-    referenceLevel = -1;
-
-    messageUntil = millis() + 1500UL;
-
-    Serial.print("Tank calibrated: ");
-    Serial.print(tankEmptyCm);
-    Serial.println(" cm");
-  }
-}
-
-// =============== BUTTON CONTROL ===============
-
-void handleButton() {
-
-  unsigned long now = millis();
-
-  bool reading = digitalRead(BUTTON_PIN);
-
-  if (reading != lastButtonReading) {
-    lastDebounceTime = now;
-  }
-
-  if (now - lastDebounceTime > 50UL) {
-
-    if (reading != stableButtonState) {
-
-      stableButtonState = reading;
-
-      if (stableButtonState == LOW) {
-
-        buttonPressed = true;
-
-        buttonPressStarted = now;
-
-        longPressHandled = false;
-      }
-      else if (buttonPressed) {
-
-        buttonPressed = false;
-
-        if (!longPressHandled) {
-          calibrateTank();
-        }
-      }
+    if (difference > 0) {
+      waterConsumedLitres += difference;
     }
   }
 
-  lastButtonReading = reading;
+  previousWaterLevelLitres = waterLevelLitres;
+}
 
-  // Hold for one second to display statistics.
+// ==========================================
+// LED INDICATORS
+// ==========================================
 
-  if (
-    buttonPressed &&
-    !longPressHandled &&
-    now - buttonPressStarted >= LONG_PRESS_MS
-  ) {
+void updateLEDs() {
 
-    longPressHandled = true;
+  if (waterLevelPercent < 0) {
+    digitalWrite(greenLED, LOW);
+    digitalWrite(yellowLED, LOW);
+    digitalWrite(redLED, LOW);
+    return;
+  }
 
-    summaryActive = true;
+  if (waterLevelPercent < 30) {
 
-    summaryStart = now;
+    digitalWrite(greenLED, LOW);
+    digitalWrite(yellowLED, LOW);
+    digitalWrite(redLED, HIGH);
+
+  } else if (waterLevelPercent < 70) {
+
+    digitalWrite(greenLED, LOW);
+    digitalWrite(yellowLED, HIGH);
+    digitalWrite(redLED, LOW);
+
+  } else {
+
+    digitalWrite(greenLED, HIGH);
+    digitalWrite(yellowLED, LOW);
+    digitalWrite(redLED, LOW);
   }
 }
 
-// =============== PUMP RUNTIME ===============
+// ==========================================
+// PUMP CONTROL
+// ==========================================
 
-void updatePumpRuntime() {
+void updatePump() {
 
-  unsigned long now = millis();
-
-  unsigned long elapsed =
-    now - lastRuntimeUpdate;
-
-  lastRuntimeUpdate = now;
-
-  if (pumpOn) {
-
-    pumpRunTodayMs += elapsed;
-
-    logDirty = true;
-  }
-}
-
-// =============== DAILY HISTORY ===============
-
-void rolloverDay() {
-
-  yesterdayWater = waterUsedToday;
-
-  yesterdayPumpSeconds =
-    pumpRunTodayMs / 1000UL;
-
-  completedDays++;
-
-  waterUsedToday = 0;
-  pumpRunTodayMs = 0;
-
-  referenceLevel = -1;
-
-  logDirty = true;
-
-  saveUsage();
-
-  Serial.println("NEW DEMO DAY");
-  Serial.println("Yesterday saved.");
-}
-
-// =============== SERIAL REPORT ===============
-
-void printUsageReport() {
-
-  Serial.println();
-  Serial.println("======= USAGE REPORT =======");
-
-  Serial.print("Water Used: ");
-  Serial.print(waterUsedToday, 2);
-  Serial.println(" Litres");
-
-  Serial.print("Pump Runtime: ");
-  printDurationSerial(pumpRunTodayMs / 1000UL);
-  Serial.println();
-
-  Serial.print("Energy Used: ");
-  Serial.print(calculateEnergy(), 4);
-  Serial.println(" kWh");
-
-  Serial.print("Electricity Cost: Rs ");
-  Serial.println(calculateCost(), 2);
-
-  Serial.println("----------------------------");
-
-  if (completedDays > 0) {
-
-    Serial.print("Yesterday Water: ");
-    Serial.print(yesterdayWater, 2);
-    Serial.println(" Litres");
-
-    Serial.print("Yesterday Pump Time: ");
-    printDurationSerial(yesterdayPumpSeconds);
-    Serial.println();
-  }
-  else {
-
-    Serial.println("Yesterday: No data yet");
+  // Sensor error: keep motor OFF
+  if (waterLevelPercent < 0) {
+    pumpOn = false;
   }
 
-  Serial.println("============================");
+  // Start pump when water level is low
+  else if (waterLevelPercent <= lowLevel) {
+    pumpOn = true;
+  }
+
+  // Stop pump when tank is nearly full
+  else if (waterLevelPercent >= fullLevel) {
+    pumpOn = false;
+  }
+
+  digitalWrite(
+    motorPin,
+    pumpOn ? HIGH : LOW
+  );
 }
 
-// =============== BUZZER ALERTS ===============
+// ==========================================
+// BUZZER ALERTS
+// ==========================================
 
 void updateBuzzer() {
 
-  unsigned long now = millis();
+  unsigned long currentTime = millis();
 
-  if (!sensorOk || waterLevel >= FULL_LEVEL) {
+  bool alertRequired =
+    waterLevelPercent < 0 ||
+    waterLevelPercent >= fullLevel;
 
-    tone(BUZZER_PIN, 1000);
+  if (!alertRequired) {
+    noTone(buzzerPin);
+    buzzerOn = false;
+    return;
   }
-  else if (waterLevel < LOW_LEVEL) {
 
-    if ((now % 1000UL) < 150UL) {
-      tone(BUZZER_PIN, 500);
-    }
-    else {
-      noTone(BUZZER_PIN);
-    }
-  }
-  else {
+  if (currentTime - lastBuzzerTime >= 1000) {
 
-    noTone(BUZZER_PIN);
+    lastBuzzerTime = currentTime;
+    buzzerOn = !buzzerOn;
+
+    if (buzzerOn) {
+      tone(buzzerPin, 2000);
+    } else {
+      noTone(buzzerPin);
+    }
   }
 }
 
-// =============== SETUP ===============
+// ==========================================
+// BUTTON FUNCTIONALITY
+// Short press: Calibrate empty tank
+// Long press: Display usage statistics
+// ==========================================
+
+void updateButton() {
+
+  bool currentState = digitalRead(buttonPin);
+  unsigned long currentTime = millis();
+
+  if (currentState == LOW && !buttonPressed) {
+
+    buttonPressed = true;
+    longPressHandled = false;
+    buttonPressTime = currentTime;
+  }
+
+  if (buttonPressed && currentState == LOW) {
+
+    if (
+      !longPressHandled &&
+      currentTime - buttonPressTime >= 1000
+    ) {
+
+      longPressHandled = true;
+
+      Serial.println(
+        "EVENT: USAGE STATISTICS"
+      );
+
+      Serial.print(
+        "Water consumed: "
+      );
+
+      Serial.print(waterConsumedLitres, 3);
+      Serial.println(" litres");
+    }
+  }
+
+  if (buttonPressed && currentState == HIGH) {
+
+    if (!longPressHandled) {
+
+      if (distanceCm > 0) {
+
+        emptyDistanceCm = distanceCm;
+
+        Serial.println(
+          "Empty tank calibration successful"
+        );
+      }
+    }
+
+    buttonPressed = false;
+  }
+}
+
+// ==========================================
+// SEND DATA THROUGH SERIAL
+// ==========================================
+
+void sendSerialData() {
+
+  if (waterLevelPercent < 0) {
+    return;
+  }
+
+  Serial.print("{\"waterLevelPercent\":");
+  Serial.print(waterLevelPercent, 2);
+
+  Serial.print(",\"waterLevelLitres\":");
+  Serial.print(waterLevelLitres, 3);
+
+  Serial.print(",\"waterConsumedLitres\":");
+  Serial.print(waterConsumedLitres, 3);
+
+  // No energy sensor is included in this component list.
+  // Therefore, actual energy consumption is not measured.
+  Serial.print(",\"energyUsedKwh\":0");
+
+  Serial.print(",\"pumpStatus\":\"");
+  Serial.print(pumpOn ? "ON" : "OFF");
+
+  Serial.print("\",\"source\":\"ARDUINO\"}");
+
+  Serial.println();
+}
+
+// ==========================================
+// SETUP
+// ==========================================
 
 void setup() {
 
-  pinMode(GREEN_LED, OUTPUT);
-  pinMode(YELLOW_LED, OUTPUT);
-  pinMode(RED_LED, OUTPUT);
-
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-
-  pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(PUMP_PIN, OUTPUT);
-
-  setPump(false);
-
   Serial.begin(9600);
 
-  lcd.begin(16, 2);
-  lcd.clear();
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
 
-  lcd.setCursor(0, 0);
-  lcd.print("SMART WATER TANK");
+  pinMode(greenLED, OUTPUT);
+  pinMode(yellowLED, OUTPUT);
+  pinMode(redLED, OUTPUT);
 
-  lcd.setCursor(0, 1);
-  lcd.print("SYSTEM STARTING");
+  pinMode(buzzerPin, OUTPUT);
+  pinMode(motorPin, OUTPUT);
 
-  // Load saved tank height.
+  pinMode(buttonPin, INPUT_PULLUP);
 
-  int savedDistance = EEPROM.read(0);
+  digitalWrite(motorPin, LOW);
 
-  if (savedDistance >= 5 && savedDistance <= 250) {
-    tankEmptyCm = savedDistance;
-  }
-
-  // Load saved usage history.
-
-  loadUsage();
-
-  lastRuntimeUpdate = millis();
-  lastMeasure = millis();
-  lastReport = millis();
-  lastSave = millis();
-
-  dayStart = millis();
-
-  Serial.println("SMART WATER TANK SYSTEM");
-  Serial.println("AUTOMATIC MODE");
-  Serial.println("USAGE TRACKING ENABLED");
-
-  delay(1500);
-
-  lcd.clear();
+  Serial.println(
+    "SmartTank Arduino System Started"
+  );
 }
 
-// =============== MAIN LOOP ===============
+// ==========================================
+// MAIN LOOP
+// ==========================================
 
 void loop() {
 
-  unsigned long now = millis();
+  unsigned long currentTime = millis();
 
-  updatePumpRuntime();
+  updateButton();
 
-  handleButton();
+  // Read sensor every 500 milliseconds
+  if (currentTime - lastSensorRead >= 500) {
 
-  // Two-minute demonstration day.
+    lastSensorRead = currentTime;
 
-  if (now - dayStart >= DAY_LENGTH_MS) {
-
-    dayStart = now;
-
-    rolloverDay();
+    updateWaterLevel();
+    updateLEDs();
+    updatePump();
+    updateBuzzer();
   }
 
-  // Measure water level every 500 ms.
+  // Send readings every 2 seconds
+  if (currentTime - lastSerialSend >= 2000) {
 
-  if (now - lastMeasure >= MEASURE_INTERVAL) {
+    lastSerialSend = currentTime;
 
-    lastMeasure = now;
-
-    measureAndControl();
+    sendSerialData();
   }
-
-  // Save when the pump is stopped.
-
-  if (
-    !pumpOn &&
-    logDirty &&
-    now - lastSave >= 1000UL
-  ) {
-
-    saveUsage();
-  }
-
-  // Periodic EEPROM backup.
-
-  if (
-    logDirty &&
-    now - lastSave >= SAVE_INTERVAL
-  ) {
-
-    saveUsage();
-  }
-
-  // Print statistics every 10 seconds.
-
-  if (now - lastReport >= REPORT_INTERVAL) {
-
-    lastReport = now;
-
-    printUsageReport();
-  }
-
-  updateBuzzer();
 }
