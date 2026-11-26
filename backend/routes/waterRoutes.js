@@ -1,4 +1,3 @@
-
 const express = require("express");
 const router = express.Router();
 const WaterReading = require("../models/WaterReading");
@@ -79,7 +78,6 @@ router.get("/history", async (req, res) => {
 router.get("/analytics", async (req, res) => {
   try {
     const { period } = req.query;
-
     const allowedPeriods = ["daily", "weekly", "monthly"];
 
     if (!allowedPeriods.includes(period)) {
@@ -122,7 +120,7 @@ router.get("/analytics", async (req, res) => {
             $sum: "$waterConsumedLitres"
           },
           totalEnergyUsed: {
-            $sum: "$energyUsedKwh"
+            $max: "$energyUsedKwh"
           },
           readingCount: {
             $sum: 1
@@ -138,7 +136,6 @@ router.get("/analytics", async (req, res) => {
       period,
       analytics
     });
-
   } catch (error) {
     res.status(500).json({
       message: "Failed to retrieve analytics",

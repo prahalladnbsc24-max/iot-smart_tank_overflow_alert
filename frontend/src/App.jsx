@@ -1,4 +1,3 @@
-
 import { useEffect, useState } from "react";
 import {
   AreaChart,
@@ -67,6 +66,12 @@ function App() {
       maximumFractionDigits: 2
     });
 
+  // Energy values are very small, so show more decimal places.
+  const formatEnergy = (value) =>
+    Number(value || 0).toLocaleString("en-IN", {
+      maximumFractionDigits: 8
+    });
+
   const waterLevel = latest
     ? Math.min(100, Math.max(0, Number(latest.waterLevelPercent) || 0))
     : 0;
@@ -108,7 +113,6 @@ function App() {
 
   return (
     <div className="dashboard">
-
       {/* SIDEBAR */}
       <aside className="sidebar">
         <div className="brand">
@@ -157,7 +161,6 @@ function App() {
 
       {/* MAIN CONTENT */}
       <main className="main-content" id="dashboard">
-
         {/* HEADER */}
         <header className="topbar">
           <div>
@@ -195,7 +198,11 @@ function App() {
         <section className="welcome">
           <div className="welcome-content">
             <span className="hero-label">SMART WATER MONITORING</span>
-            <h2>Water management,<br />made smarter.</h2>
+            <h2>
+              Water management,
+              <br />
+              made smarter.
+            </h2>
             <p>
               Keep track of your tank levels, water consumption
               and energy usage from one place.
@@ -248,7 +255,6 @@ function App() {
         </div>
 
         <section className="stats-grid">
-
           <div className="stat-card water-stat">
             <div className="stat-top">
               <div className="stat-icon">💧</div>
@@ -286,11 +292,11 @@ function App() {
             <p>Energy Used</p>
             <h2>
               {latest
-                ? `${formatNumber(latest.energyUsedKwh)}`
+                ? formatEnergy(latest.energyUsedKwh)
                 : "--"}
               <small>{latest ? " kWh" : ""}</small>
             </h2>
-            <span>Latest saved reading</span>
+            <span>Cumulative estimate since Arduino reset</span>
           </div>
 
           <div className="stat-card pump-stat">
@@ -304,12 +310,10 @@ function App() {
             </h2>
             <span>Latest saved reading</span>
           </div>
-
         </section>
 
         {/* ANALYTICS */}
         <section className="analytics-section">
-
           <div className="section-heading">
             <div>
               <span className="section-kicker">PERFORMANCE</span>
@@ -330,7 +334,6 @@ function App() {
           </div>
 
           <section className="charts-grid">
-
             {/* WATER CHART */}
             <div className="chart-card" id="water">
               <div className="chart-title-row">
@@ -412,8 +415,11 @@ function App() {
             <div className="chart-card" id="energy">
               <div className="chart-title-row">
                 <div>
-                  <h3>Energy Consumption</h3>
-                  <p>{period} recorded energy usage</p>
+                  <h3>Cumulative Energy</h3>
+                  <p>
+                    Highest cumulative reading in each {period.toLowerCase()}{" "}
+                    group
+                  </p>
                 </div>
                 <div className="chart-symbol energy-symbol">ϟ</div>
               </div>
@@ -434,9 +440,14 @@ function App() {
                   <YAxis
                     stroke="#7890a8"
                     tick={{ fontSize: 11 }}
+                    tickFormatter={formatEnergy}
                   />
 
                   <Tooltip
+                    formatter={(value) => [
+                      `${formatEnergy(value)} kWh`,
+                      "Energy"
+                    ]}
                     contentStyle={{
                       background: "#14283d",
                       border: "1px solid #2a4963",
@@ -460,13 +471,11 @@ function App() {
                 </p>
               )}
             </div>
-
           </section>
         </section>
 
         {/* BOTTOM PANELS */}
         <section className="bottom-grid">
-
           {/* RECENT READINGS */}
           <div className="recent-card">
             <div className="panel-heading">
@@ -543,14 +552,12 @@ function App() {
                 : "Waiting for the first tank reading."}
             </div>
           </div>
-
         </section>
 
         <footer>
           <span>💧 SmartTank</span>
           <span>IoT Water Monitoring System</span>
         </footer>
-
       </main>
     </div>
   );
